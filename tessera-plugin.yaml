@@ -2,7 +2,7 @@
 # The driver is components/p4_csi_camera, a patched copy of sullb/esphome-p4-csi-camera that shares the touch panel's
 # I2C bus (touch_bus) with the sensor instead of opening a second controller on GPIO7/GPIO8.
 id: panel_camera
-version: 0.2.0
+version: 0.3.0
 api: "0.10"
 icon: cctv
 maintainer: mjonessa

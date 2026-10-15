@@ -278,11 +278,6 @@ void P4CSICamera::loop() {
   esp_task_wdt_reset();
 
   uint32_t now = millis();
-  if (this->exposure_dirty_ && now - this->last_exposure_publish_ >= 1000) {
-    this->exposure_dirty_ = false;
-    this->last_exposure_publish_ = now;
-    this->exposure_callback_.call();
-  }
   bool needs_image = this->has_requested_image_();
   bool streaming = this->stream_requesters_ != 0;
   uint32_t interval = streaming ? this->max_update_interval_ : this->idle_update_interval_;
@@ -290,7 +285,7 @@ void P4CSICamera::loop() {
   if (now - this->last_update_ < interval) return;
 
   // Take the newest frame and hand the older ones straight back. The driver fills the queued buffers in order and then
-  // waits, so the first one out can be many seconds old after an idle spell, and auto exposure would steer on it.
+  // waits, so the first one out can be many seconds old after an idle spell.
   struct v4l2_buffer buf = {};
   bool have_frame = false;
   for (int i = 0; i < NUM_FRAME_BUFFERS; i++) {
@@ -342,8 +337,6 @@ void P4CSICamera::loop() {
 
       pixels[i] = (r << 11) | (g << 5) | b;
     }
-
-    this->auto_expose_(pixels, num_pixels);
 
     // Software vertical flip (swap rows top-to-bottom)
     if (this->vertical_flip_) {
@@ -423,8 +416,6 @@ void P4CSICamera::dump_config() {
   ESP_LOGCONFIG(TAG, "  Max Update Interval: %d ms", this->max_update_interval_);
   ESP_LOGCONFIG(TAG, "  Initialized: %s", this->initialized_ ? "YES" : "NO");
   if (this->exposure_ready_) {
-    ESP_LOGCONFIG(TAG, "  Auto exposure: %s (target %u, max %.0f ms, flicker %u Hz)", this->auto_exposure_ ? "ON" : "OFF",
-                  this->ae_target_, this->max_exposure_us_ / 1000.0f, this->flicker_hz_);
     ESP_LOGCONFIG(TAG, "  Exposure: %.1f ms, analog gain %.2fx, digital gain %.2fx", this->get_exposure_ms(),
                   this->get_analog_gain(), this->get_digital_gain());
   } else {
@@ -514,7 +505,6 @@ void P4CSICamera::read_exposure_() {
   ESP_LOGI(TAG, "Sensor exposure: %u lines (%.1f ms, line %u ns, VTS %u), analog gain %.2fx, digital gain %.2fx",
            (unsigned) this->exposure_lines_, this->get_exposure_ms(), (unsigned) this->line_ns_, this->vts_default_,
            this->get_analog_gain(), this->get_digital_gain());
-  this->exposure_dirty_ = true;
 }
 
 float P4CSICamera::get_exposure_ms() const { return this->exposure_lines_ * (this->line_ns_ / 1000000.0f); }
@@ -544,94 +534,23 @@ void P4CSICamera::apply_exposure_() {
   if (!ok)
     ESP_LOGW(TAG, "Writing exposure to the sensor failed");
   this->vts_ = vts;
-  this->exposure_changed_();
-}
-
-void P4CSICamera::exposure_changed_() { this->exposure_dirty_ = true; }
-
-// One step of auto exposure from a frame: the mean brightness of a sample of its pixels against ae_target. Exposure
-// goes up first (to max_exposure), then analog gain, then digital gain; down in the reverse order. Under mains light
-// the exposure keeps to whole half-periods of the mains (10 ms at 50 Hz) once it is that long, so lights don't band.
-void P4CSICamera::auto_expose_(const uint16_t *pixels, size_t num_pixels) {
-  if (!this->exposure_ready_ || num_pixels == 0)
-    return;
-  uint32_t sum = 0, count = 0;
-  for (size_t i = 0; i < num_pixels; i += 61) {
-    uint16_t px = pixels[i];
-    uint32_t r = ((px >> 11) & 0x1F) << 3, g = ((px >> 5) & 0x3F) << 2, b = (px & 0x1F) << 3;
-    sum += (77 * r + 150 * g + 29 * b) >> 8;
-    count++;
-  }
-  uint8_t mean = count ? sum / count : 0;
-  this->last_brightness_ = mean;
-  if (!this->auto_exposure_)
-    return;
-
-  float ratio = (float) this->ae_target_ / std::max<uint8_t>(mean, 1);
-  if (ratio > 0.92f && ratio < 1.08f)
-    return;
-  // Big steps when far off (a dark room after a bright one), gentle ones near the target so it doesn't hunt.
-  float limit = (ratio > 3.0f || ratio < 0.33f) ? 4.0f : 1.6f;
-  ratio = std::clamp(ratio, 1.0f / limit, limit);
-
-  float line_us = this->line_ns_ / 1000.0f;
-  float total = this->exposure_lines_ * (this->analog_gain_ / 16.0f) * (this->digital_gain_ / 1024.0f) * ratio;
-  float max_lines = std::max(this->max_exposure_us_ / line_us, (float) OV02C10_EXPOSURE_MIN);
-
-  float lines = std::clamp(total, (float) OV02C10_EXPOSURE_MIN, max_lines);
-  if (this->flicker_hz_ > 0) {
-    float step = 1000000.0f / (2.0f * this->flicker_hz_) / line_us;
-    if (lines >= step)
-      lines = std::max(step, std::floor(lines / step) * step);
-  }
-  float rest = total / lines;
-  float again = std::clamp(rest, 1.0f, OV02C10_AGAIN_MAX / 16.0f);
-  rest /= again;
-  float dgain = std::clamp(rest, 1.0f, OV02C10_DGAIN_MAX / 1024.0f);
-
-  uint32_t new_lines = (uint32_t) lines;
-  uint16_t new_again = (uint16_t) (again * 16.0f + 0.5f);
-  uint32_t new_dgain = (uint32_t) (dgain * 1024.0f + 0.5f);
-  if (new_lines == this->exposure_lines_ && new_again == this->analog_gain_ && new_dgain == this->digital_gain_)
-    return;  // at a limit: as bright or as dark as it gets
-  ESP_LOGD(TAG, "AE: brightness %u -> target %u: %.1f ms, gain %.2fx, digital %.2fx", mean, this->ae_target_,
-           new_lines * line_us / 1000.0f, new_again / 16.0f, new_dgain / 1024.0f);
-  this->exposure_lines_ = new_lines;
-  this->analog_gain_ = new_again;
-  this->digital_gain_ = new_dgain;
-  this->apply_exposure_();
-}
-
-void P4CSICamera::set_auto_exposure_runtime(bool on) {
-  this->auto_exposure_ = on;
-  ESP_LOGI(TAG, "Auto exposure %s", on ? "ON" : "OFF");
-  this->exposure_changed_();
-}
-
-void P4CSICamera::set_ae_target_runtime(uint8_t target) {
-  this->ae_target_ = target;
-  ESP_LOGI(TAG, "Auto exposure target set to %u", target);
-  this->exposure_changed_();
 }
 
 void P4CSICamera::set_exposure_ms_runtime(float ms) {
-  this->auto_exposure_ = false;
   this->exposure_lines_ = (uint32_t) (ms * 1000000.0f / this->line_ns_);
-  ESP_LOGI(TAG, "Exposure set to %.1f ms (auto exposure off)", ms);
+  ESP_LOGI(TAG, "Exposure set to %.1f ms", ms);
   this->apply_exposure_();
 }
 
 void P4CSICamera::set_analog_gain_runtime(float gain) {
-  this->auto_exposure_ = false;
   this->analog_gain_ = (uint16_t) (gain * 16.0f + 0.5f);
-  ESP_LOGI(TAG, "Analog gain set to %.2fx (auto exposure off)", gain);
+  ESP_LOGI(TAG, "Analog gain set to %.2fx", gain);
   this->apply_exposure_();
 }
 
 void P4CSICamera::set_digital_gain_runtime(float gain) {
-  this->auto_exposure_ = false;
   this->digital_gain_ = (uint32_t) (gain * 1024.0f + 0.5f);
-  ESP_LOGI(TAG, "Digital gain set to %.2fx (auto exposure off)", gain);
+  ESP_LOGI(TAG, "Digital gain set to %.2fx", gain);
   this->apply_exposure_();
 }
 

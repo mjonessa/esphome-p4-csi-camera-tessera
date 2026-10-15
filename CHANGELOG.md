@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 - 2026-10-16
+
+- Auto exposure and **Camera Brightness Target** are gone: they didn't brighten the picture. The camera starts on
+  the sensor's own exposure again.
+- **Camera Exposure**, **Camera Analog Gain**, **Camera Digital Gain** and **Camera JPEG Quality** keep the value you
+  set across restarts and updates.
+
 ## 0.2.0 - 2026-10-15
 
 - Auto exposure: the camera now brightens a dark room by itself, first with a longer exposure (up to 250 ms),

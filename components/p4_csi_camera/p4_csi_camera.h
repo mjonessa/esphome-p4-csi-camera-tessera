@@ -77,27 +77,16 @@ class P4CSICamera : public camera::Camera {
   void set_vertical_flip_runtime(bool flip);
   void set_horizontal_flip_runtime(bool flip);
 
-  // Exposure and gain, written straight to the OV02C10 over the shared I2C bus (needs i2c_id). The sensor has no
-  // auto exposure of its own; with auto exposure on, loop() steers these towards ae_target from each frame's brightness.
-  void set_auto_exposure(bool on) { this->auto_exposure_ = on; }
-  void set_ae_target(uint8_t target) { this->ae_target_ = target; }
-  void set_max_exposure_us(uint32_t us) { this->max_exposure_us_ = us; }
-  void set_flicker_hz(uint8_t hz) { this->flicker_hz_ = hz; }
+  // Exposure and gain, written straight to the OV02C10 over the shared I2C bus (needs i2c_id). The sensor has no auto
+  // exposure of its own; it starts on its register table's values, read back in setup().
+  void set_exposure_ms_runtime(float ms);
+  void set_analog_gain_runtime(float gain);
+  void set_digital_gain_runtime(float gain);
 
-  void set_auto_exposure_runtime(bool on);
-  void set_ae_target_runtime(uint8_t target);
-  void set_exposure_ms_runtime(float ms);       // turns auto exposure off
-  void set_analog_gain_runtime(float gain);     // turns auto exposure off
-  void set_digital_gain_runtime(float gain);    // turns auto exposure off
-
-  bool get_auto_exposure() const { return this->auto_exposure_; }
-  uint8_t get_ae_target() const { return this->ae_target_; }
   float get_exposure_ms() const;
   float get_analog_gain() const { return this->analog_gain_ / 16.0f; }
   float get_digital_gain() const { return this->digital_gain_ / 1024.0f; }
   bool has_exposure_control() const { return this->exposure_ready_; }
-  // Called when exposure, gain or auto exposure changed, at most once a second, so the entities show the values.
-  void add_on_exposure_callback(std::function<void()> &&callback) { this->exposure_callback_.add(std::move(callback)); }
 
   uint8_t get_jpeg_quality() const { return this->jpeg_quality_; }
   bool get_vertical_flip() const { return this->vertical_flip_; }
@@ -121,8 +110,6 @@ class P4CSICamera : public camera::Camera {
   bool write_reg_(uint16_t reg, uint8_t value);
   void read_exposure_();
   void apply_exposure_();
-  void auto_expose_(const uint16_t *pixels, size_t num_pixels);
-  void exposure_changed_();
   void fail_(const char *format, ...) __attribute__((format(printf, 2, 3)));
 
   // Configuration
@@ -156,10 +143,6 @@ class P4CSICamera : public camera::Camera {
   char failure_[96]{};
 
   // Exposure state, in the sensor's units: lines, analog gain x16 (16 = 1x), digital gain x1024 (1024 = 1x).
-  bool auto_exposure_{true};
-  uint8_t ae_target_{110};
-  uint32_t max_exposure_us_{250000};
-  uint8_t flicker_hz_{50};
   bool exposure_ready_{false};
   uint32_t line_ns_{27918};
   uint16_t vts_default_{1164};
@@ -167,10 +150,7 @@ class P4CSICamera : public camera::Camera {
   uint32_t exposure_lines_{0};
   uint16_t analog_gain_{16};
   uint32_t digital_gain_{1024};
-  uint8_t last_brightness_{0};
-  bool exposure_dirty_{false};
-  uint32_t last_exposure_publish_{0};
-  CallbackManager<void()> exposure_callback_{};  std::shared_ptr<P4CSICameraImage> current_image_;
+  std::shared_ptr<P4CSICameraImage> current_image_;
   uint8_t single_requesters_{0};
   uint8_t stream_requesters_{0};
   uint64_t last_update_{0};

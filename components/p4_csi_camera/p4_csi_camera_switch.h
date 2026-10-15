@@ -12,7 +12,6 @@ namespace p4_csi_camera {
 enum FlipMode : uint8_t {
   FLIP_MODE_VERTICAL = 0,
   FLIP_MODE_HORIZONTAL = 1,
-  SWITCH_AUTO_EXPOSURE = 2,
 };
 
 class P4CSICameraFlipSwitch : public switch_::Switch, public Component {
@@ -22,14 +21,7 @@ class P4CSICameraFlipSwitch : public switch_::Switch, public Component {
 
   void setup() override {
     bool state;
-    if (this->flip_mode_ == SWITCH_AUTO_EXPOSURE) {
-      // Setting exposure or a gain by hand turns auto exposure off: follow that.
-      this->camera_->add_on_exposure_callback([this]() {
-        if (this->camera_->get_auto_exposure() != this->state)
-          this->publish_state(this->camera_->get_auto_exposure());
-      });
-      state = this->camera_->get_auto_exposure();
-    } else if (this->flip_mode_ == FLIP_MODE_VERTICAL) {
+    if (this->flip_mode_ == FLIP_MODE_VERTICAL) {
       state = this->camera_->get_vertical_flip();
     } else {
       state = this->camera_->get_horizontal_flip();
@@ -41,9 +33,7 @@ class P4CSICameraFlipSwitch : public switch_::Switch, public Component {
 
  protected:
   void write_state(bool state) override {
-    if (this->flip_mode_ == SWITCH_AUTO_EXPOSURE) {
-      this->camera_->set_auto_exposure_runtime(state);
-    } else if (this->flip_mode_ == FLIP_MODE_VERTICAL) {
+    if (this->flip_mode_ == FLIP_MODE_VERTICAL) {
       this->camera_->set_vertical_flip_runtime(state);
     } else {
       this->camera_->set_horizontal_flip_runtime(state);
