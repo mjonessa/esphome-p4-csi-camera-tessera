@@ -13,8 +13,22 @@ Home Assistant: a picture on a dashboard, a stream when you open it, snapshots i
 1. In Tessera, open **Plugins** and add this repository by its link:
    `https://github.com/mjonessa/esphome-p4-csi-camera-tessera`.
 2. Tick your screen. It builds once with the plugin and updates over Wi-Fi.
-3. In Home Assistant, open the screen's device: **Panel Camera** is there, with **Camera JPEG Quality** and the two
-   flip switches.
+3. In Home Assistant, open the screen's device: **Panel Camera** is there, with its controls under Configuration.
+
+## Brightness
+
+The OV02C10 has no auto exposure of its own, so the plugin brings one. From each picture it measures the brightness
+and steers towards **Camera Brightness Target** (16 to 240, 110 to start): a longer exposure first, up to 250 ms,
+then **Camera Analog Gain** (up to 15.5x), then **Camera Digital Gain** (up to 4x). A longer exposure keeps to steps
+of 10 ms, so lights on 50 Hz mains don't show bands.
+
+- Too dark or too bright overall: raise or lower **Camera Brightness Target**.
+- Fixed values: set **Camera Exposure** or one of the gains. That turns **Camera Auto Exposure** off; turn it on again
+  to go back.
+- The entities follow auto exposure, so they show what the sensor runs at.
+
+Auto exposure steps once per picture: about two a second while a stream is open, once every ten seconds otherwise,
+so give it a few pictures after the light changes.
 
 ## What it is
 
@@ -27,12 +41,18 @@ The driver in `components/p4_csi_camera` is a patched copy of
   `init_sccb = false`, so the touch panel and the camera share one controller. Without `i2c_id` it behaves as upstream.
 - **`sccb_frequency`** (default `100kHz`): the camera's speed on that bus. The touch panel keeps its own 400 kHz.
 - **esp-video-components pinned** to commit `ee31057` instead of `master`, so a build doesn't change under you.
+- **The sensor driver is linked in**: ESPHome 2026.9 builds the sources into an archive, which left `ov02c10_sensor.c`
+  out; referencing `ov02c10_detect` keeps it.
+- **Exposure and gain**: auto exposure, and numbers for exposure, analog gain, digital gain and the target, written
+  to the sensor's registers over the shared bus (`auto_exposure`, `ae_target`, `max_exposure`, `flicker_frequency`).
+- **The newest frame**: older queued frames are handed back, so a picture is never minutes old.
 
 `components/panel_camera` only registers the plugin with Tessera.
 
 ## Known limits
 
 - About two pictures a second; colours come from fixed white-balance gains and may look off in some light.
+- Auto exposure reads the whole picture equally: a bright window in view makes the rest darker.
 - The upstream driver was never run beside a MIPI-DSI display before this plugin. If touch stops reacting after the
   update, remove the plugin and update again.
 

@@ -1,6 +1,7 @@
 # What a screen gets when it takes this plugin: its OV02C10 camera as ESPHome's camera, which Home Assistant shows on the
-# screen's device, a number for the JPEG quality and two switches to flip the picture. The sensor answers on the touch
-# panel's bus (touch_bus, GPIO7/GPIO8); esp_video asks for the MIPI PHY's LDO the board file already holds at 2.5 V.
+# screen's device, with auto exposure, numbers for the JPEG quality, exposure, gains and the auto exposure target, and
+# switches for auto exposure and to flip the picture. The sensor answers on the touch panel's bus (touch_bus,
+# GPIO7/GPIO8); esp_video asks for the MIPI PHY's LDO the board file already holds at 2.5 V.
 p4_csi_camera:
   id: panel_camera_cam
   name: "Panel Camera"
@@ -9,11 +10,25 @@ p4_csi_camera:
   max_framerate: 2 fps
   idle_framerate: 0.1 fps
   jpeg_quality: 40
+  # The sensor has no auto exposure of its own; this one steers exposure, then gain, towards ae_target (16-240).
+  auto_exposure: true
+  ae_target: 110
+  max_exposure: 250ms
+  flicker_frequency: 50Hz
 
 number:
   - platform: p4_csi_camera
     camera_id: panel_camera_cam
-    name: "Camera JPEG Quality"
+    jpeg_quality:
+      name: "Camera JPEG Quality"
+    exposure:
+      name: "Camera Exposure"
+    analog_gain:
+      name: "Camera Analog Gain"
+    digital_gain:
+      name: "Camera Digital Gain"
+    ae_target:
+      name: "Camera Brightness Target"
 
 switch:
   - platform: p4_csi_camera
@@ -22,5 +37,7 @@ switch:
       name: "Camera Vertical Flip"
     horizontal_flip:
       name: "Camera Horizontal Flip"
+    auto_exposure:
+      name: "Camera Auto Exposure"
 
 panel_camera:

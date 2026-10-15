@@ -27,6 +27,10 @@ CONF_RESET_PIN = "reset_pin"
 CONF_POWER_PIN = "power_pin"
 CONF_I2C_ID = "i2c_id"
 CONF_SCCB_FREQUENCY = "sccb_frequency"
+CONF_AUTO_EXPOSURE = "auto_exposure"
+CONF_AE_TARGET = "ae_target"
+CONF_MAX_EXPOSURE = "max_exposure"
+CONF_FLICKER_FREQUENCY = "flicker_frequency"
 CONF_JPEG_QUALITY = "jpeg_quality"
 CONF_VERTICAL_FLIP = "vertical_flip"
 CONF_HORIZONTAL_FLIP = "horizontal_flip"
@@ -60,6 +64,16 @@ CONFIG_SCHEMA = (
             cv.Optional(CONF_POWER_PIN): cv.int_,
             cv.Optional(CONF_I2C_ID): cv.use_id(i2c.I2CBus),
             cv.Optional(CONF_SCCB_FREQUENCY, default="100kHz"): cv.frequency,
+            # Exposure and gain need i2c_id: they are written to the sensor over that bus.
+            cv.Optional(CONF_AUTO_EXPOSURE, default=True): cv.boolean,
+            cv.Optional(CONF_AE_TARGET, default=110): cv.int_range(min=16, max=240),
+            cv.Optional(CONF_MAX_EXPOSURE, default="250ms"): cv.All(
+                cv.positive_time_period_microseconds,
+                cv.Range(min=cv.TimePeriod(milliseconds=1), max=cv.TimePeriod(milliseconds=1000)),
+            ),
+            cv.Optional(CONF_FLICKER_FREQUENCY, default="50Hz"): cv.Any(
+                cv.one_of("off", lower=True), cv.All(cv.frequency, cv.one_of(50.0, 60.0))
+            ),
             cv.Optional(CONF_JPEG_QUALITY, default=40): cv.int_range(min=10, max=100),
             cv.Optional(CONF_VERTICAL_FLIP, default=False): cv.boolean,
             cv.Optional(CONF_HORIZONTAL_FLIP, default=False): cv.boolean,
@@ -91,6 +105,11 @@ async def to_code(config):
         bus = await cg.get_variable(config[CONF_I2C_ID])
         cg.add(var.set_i2c_bus(bus))
     cg.add(var.set_sccb_frequency(int(config[CONF_SCCB_FREQUENCY])))
+    cg.add(var.set_auto_exposure(config[CONF_AUTO_EXPOSURE]))
+    cg.add(var.set_ae_target(config[CONF_AE_TARGET]))
+    cg.add(var.set_max_exposure_us(config[CONF_MAX_EXPOSURE].total_microseconds))
+    flicker = config[CONF_FLICKER_FREQUENCY]
+    cg.add(var.set_flicker_hz(0 if flicker == "off" else int(flicker)))
 
     cg.add(var.set_jpeg_quality(config[CONF_JPEG_QUALITY]))
     cg.add(var.set_vertical_flip(config[CONF_VERTICAL_FLIP]))

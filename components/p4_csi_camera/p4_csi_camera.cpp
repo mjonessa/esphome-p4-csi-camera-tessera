@@ -21,6 +21,8 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <cstdarg>
+#include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <unistd.h>
 
@@ -263,6 +265,8 @@ void P4CSICamera::setup() {
   this->jpeg_buffer_.width = this->frame_width_;
   this->jpeg_buffer_.height = this->frame_height_;
 
+  this->read_exposure_();
+
   this->initialized_ = true;
   ESP_LOGI(TAG, "Camera initialized successfully! Streaming %dx%d", this->frame_width_, this->frame_height_);
 }
@@ -274,18 +278,33 @@ void P4CSICamera::loop() {
   esp_task_wdt_reset();
 
   uint32_t now = millis();
+  if (this->exposure_dirty_ && now - this->last_exposure_publish_ >= 1000) {
+    this->exposure_dirty_ = false;
+    this->last_exposure_publish_ = now;
+    this->exposure_callback_.call();
+  }
   bool needs_image = this->has_requested_image_();
   bool streaming = this->stream_requesters_ != 0;
   uint32_t interval = streaming ? this->max_update_interval_ : this->idle_update_interval_;
 
   if (now - this->last_update_ < interval) return;
 
-  // Dequeue a frame
+  // Take the newest frame and hand the older ones straight back. The driver fills the queued buffers in order and then
+  // waits, so the first one out can be many seconds old after an idle spell, and auto exposure would steer on it.
   struct v4l2_buffer buf = {};
-  buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  buf.memory = V4L2_MEMORY_MMAP;
-
-  if (ioctl(this->video_fd_, VIDIOC_DQBUF, &buf) != 0) {
+  bool have_frame = false;
+  for (int i = 0; i < NUM_FRAME_BUFFERS; i++) {
+    struct v4l2_buffer next = {};
+    next.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    next.memory = V4L2_MEMORY_MMAP;
+    if (ioctl(this->video_fd_, VIDIOC_DQBUF, &next) != 0)
+      break;
+    if (have_frame && ioctl(this->video_fd_, VIDIOC_QBUF, &buf) != 0)
+      ESP_LOGW(TAG, "VIDIOC_QBUF failed (errno %d)", errno);
+    buf = next;
+    have_frame = true;
+  }
+  if (!have_frame) {
     if (errno != EAGAIN) {
       ESP_LOGW(TAG, "VIDIOC_DQBUF failed: errno=%d", errno);
     }
@@ -323,6 +342,8 @@ void P4CSICamera::loop() {
 
       pixels[i] = (r << 11) | (g << 5) | b;
     }
+
+    this->auto_expose_(pixels, num_pixels);
 
     // Software vertical flip (swap rows top-to-bottom)
     if (this->vertical_flip_) {
@@ -401,6 +422,14 @@ void P4CSICamera::dump_config() {
   ESP_LOGCONFIG(TAG, "  Data Lanes: %d", this->data_lanes_);
   ESP_LOGCONFIG(TAG, "  Max Update Interval: %d ms", this->max_update_interval_);
   ESP_LOGCONFIG(TAG, "  Initialized: %s", this->initialized_ ? "YES" : "NO");
+  if (this->exposure_ready_) {
+    ESP_LOGCONFIG(TAG, "  Auto exposure: %s (target %u, max %.0f ms, flicker %u Hz)", this->auto_exposure_ ? "ON" : "OFF",
+                  this->ae_target_, this->max_exposure_us_ / 1000.0f, this->flicker_hz_);
+    ESP_LOGCONFIG(TAG, "  Exposure: %.1f ms, analog gain %.2fx, digital gain %.2fx", this->get_exposure_ms(),
+                  this->get_analog_gain(), this->get_digital_gain());
+  } else {
+    ESP_LOGCONFIG(TAG, "  Exposure control: unavailable (needs i2c_id)");
+  }
   if (this->failure_[0] != '\0')
     ESP_LOGCONFIG(TAG, "  Failed: %s", this->failure_);
 }
@@ -427,6 +456,183 @@ camera::CameraImageReader *P4CSICamera::create_image_reader() {
 }
 bool P4CSICamera::has_requested_image_() const {
   return this->single_requesters_ != 0;
+}
+
+// ---------------------------------------------------------------------------
+// Exposure and gain
+// ---------------------------------------------------------------------------
+// OV02C10 registers (as Linux's ov02c10 driver uses them): exposure in lines at 0x3501-0x3502, analog gain at
+// 0x3508-0x3509 as gain x16 shifted left 4 (0x10 = 1x, 0xf8 = 15.5x), digital gain at 0x350a-0x350c as gain x1024
+// shifted left 6 (0x400 = 1x), frame length (VTS) at 0x380e-0x380f, line length (HTS) at 0x380c-0x380d. Exposure stays
+// at least 8 lines under VTS, so a longer exposure stretches the frame (fewer sensor frames a second, fine at 2 fps).
+static constexpr uint32_t OV02C10_PCLK_HZ = 81666700;
+static constexpr uint16_t OV02C10_EXPOSURE_MIN = 4;
+static constexpr uint16_t OV02C10_EXPOSURE_MARGIN = 8;
+static constexpr uint16_t OV02C10_AGAIN_MIN = 0x10;
+static constexpr uint16_t OV02C10_AGAIN_MAX = 0xf8;
+static constexpr uint32_t OV02C10_DGAIN_MIN = 1024;
+static constexpr uint32_t OV02C10_DGAIN_MAX = 4096;  // 4x: past this the picture is mostly noise
+static constexpr uint32_t OV02C10_VTS_MAX = 0xffff;
+
+bool P4CSICamera::read_reg_(uint16_t reg, uint8_t *value) {
+  uint8_t addr[2] = {(uint8_t) (reg >> 8), (uint8_t) (reg & 0xff)};
+  return this->i2c_bus_->write_readv(OV02C10_SCCB_ADDR, addr, 2, value, 1) == i2c::ERROR_OK;
+}
+
+bool P4CSICamera::write_reg_(uint16_t reg, uint8_t value) {
+  uint8_t data[3] = {(uint8_t) (reg >> 8), (uint8_t) (reg & 0xff), value};
+  return this->i2c_bus_->write_readv(OV02C10_SCCB_ADDR, data, 3, nullptr, 0) == i2c::ERROR_OK;
+}
+
+void P4CSICamera::read_exposure_() {
+  if (this->i2c_bus_ == nullptr) {
+    ESP_LOGW(TAG, "No i2c_id: exposure and gain controls are off");
+    return;
+  }
+  uint8_t r[9];
+  const uint16_t regs[9] = {0x3501, 0x3502, 0x3508, 0x3509, 0x350a, 0x350b, 0x350c, 0x380e, 0x380f};
+  for (int i = 0; i < 9; i++) {
+    if (!this->read_reg_(regs[i], &r[i])) {
+      ESP_LOGW(TAG, "Reading sensor register 0x%04x failed: exposure and gain controls are off", regs[i]);
+      return;
+    }
+  }
+  uint8_t hts_hi, hts_lo;
+  if (this->read_reg_(0x380c, &hts_hi) && this->read_reg_(0x380d, &hts_lo)) {
+    uint32_t hts = (hts_hi << 8) | hts_lo;
+    if (hts > 0)
+      this->line_ns_ = (uint32_t) ((uint64_t) hts * 1000000000ULL / OV02C10_PCLK_HZ);
+  }
+  this->exposure_lines_ = (r[0] << 8) | r[1];
+  this->analog_gain_ = (((r[2] << 8) | r[3]) >> 4);
+  this->digital_gain_ = (((uint32_t) r[4] << 16) | (r[5] << 8) | r[6]) >> 6;
+  this->vts_default_ = (r[7] << 8) | r[8];
+  this->vts_ = this->vts_default_;
+  this->analog_gain_ = std::clamp<uint16_t>(this->analog_gain_, OV02C10_AGAIN_MIN, OV02C10_AGAIN_MAX);
+  this->digital_gain_ = std::clamp<uint32_t>(this->digital_gain_, OV02C10_DGAIN_MIN, OV02C10_DGAIN_MAX);
+  this->exposure_ready_ = true;
+  ESP_LOGI(TAG, "Sensor exposure: %u lines (%.1f ms, line %u ns, VTS %u), analog gain %.2fx, digital gain %.2fx",
+           (unsigned) this->exposure_lines_, this->get_exposure_ms(), (unsigned) this->line_ns_, this->vts_default_,
+           this->get_analog_gain(), this->get_digital_gain());
+  this->exposure_dirty_ = true;
+}
+
+float P4CSICamera::get_exposure_ms() const { return this->exposure_lines_ * (this->line_ns_ / 1000000.0f); }
+
+void P4CSICamera::apply_exposure_() {
+  if (!this->exposure_ready_)
+    return;
+  uint32_t max_lines = OV02C10_VTS_MAX - OV02C10_EXPOSURE_MARGIN;
+  this->exposure_lines_ = std::clamp<uint32_t>(this->exposure_lines_, OV02C10_EXPOSURE_MIN, max_lines);
+  this->analog_gain_ = std::clamp<uint16_t>(this->analog_gain_, OV02C10_AGAIN_MIN, OV02C10_AGAIN_MAX);
+  this->digital_gain_ = std::clamp<uint32_t>(this->digital_gain_, OV02C10_DGAIN_MIN, OV02C10_DGAIN_MAX);
+  uint32_t vts = std::max<uint32_t>(this->vts_default_, this->exposure_lines_ + OV02C10_EXPOSURE_MARGIN);
+  uint16_t again = this->analog_gain_ << 4;
+  uint32_t dgain = this->digital_gain_ << 6;
+  bool ok = true;
+  if (vts != this->vts_) {
+    ok &= this->write_reg_(0x380e, vts >> 8);
+    ok &= this->write_reg_(0x380f, vts & 0xff);
+  }
+  ok &= this->write_reg_(0x3501, this->exposure_lines_ >> 8);
+  ok &= this->write_reg_(0x3502, this->exposure_lines_ & 0xff);
+  ok &= this->write_reg_(0x3508, again >> 8);
+  ok &= this->write_reg_(0x3509, again & 0xff);
+  ok &= this->write_reg_(0x350a, (dgain >> 16) & 0xff);
+  ok &= this->write_reg_(0x350b, (dgain >> 8) & 0xff);
+  ok &= this->write_reg_(0x350c, dgain & 0xff);
+  if (!ok)
+    ESP_LOGW(TAG, "Writing exposure to the sensor failed");
+  this->vts_ = vts;
+  this->exposure_changed_();
+}
+
+void P4CSICamera::exposure_changed_() { this->exposure_dirty_ = true; }
+
+// One step of auto exposure from a frame: the mean brightness of a sample of its pixels against ae_target. Exposure
+// goes up first (to max_exposure), then analog gain, then digital gain; down in the reverse order. Under mains light
+// the exposure keeps to whole half-periods of the mains (10 ms at 50 Hz) once it is that long, so lights don't band.
+void P4CSICamera::auto_expose_(const uint16_t *pixels, size_t num_pixels) {
+  if (!this->exposure_ready_ || num_pixels == 0)
+    return;
+  uint32_t sum = 0, count = 0;
+  for (size_t i = 0; i < num_pixels; i += 61) {
+    uint16_t px = pixels[i];
+    uint32_t r = ((px >> 11) & 0x1F) << 3, g = ((px >> 5) & 0x3F) << 2, b = (px & 0x1F) << 3;
+    sum += (77 * r + 150 * g + 29 * b) >> 8;
+    count++;
+  }
+  uint8_t mean = count ? sum / count : 0;
+  this->last_brightness_ = mean;
+  if (!this->auto_exposure_)
+    return;
+
+  float ratio = (float) this->ae_target_ / std::max<uint8_t>(mean, 1);
+  if (ratio > 0.92f && ratio < 1.08f)
+    return;
+  // Big steps when far off (a dark room after a bright one), gentle ones near the target so it doesn't hunt.
+  float limit = (ratio > 3.0f || ratio < 0.33f) ? 4.0f : 1.6f;
+  ratio = std::clamp(ratio, 1.0f / limit, limit);
+
+  float line_us = this->line_ns_ / 1000.0f;
+  float total = this->exposure_lines_ * (this->analog_gain_ / 16.0f) * (this->digital_gain_ / 1024.0f) * ratio;
+  float max_lines = std::max(this->max_exposure_us_ / line_us, (float) OV02C10_EXPOSURE_MIN);
+
+  float lines = std::clamp(total, (float) OV02C10_EXPOSURE_MIN, max_lines);
+  if (this->flicker_hz_ > 0) {
+    float step = 1000000.0f / (2.0f * this->flicker_hz_) / line_us;
+    if (lines >= step)
+      lines = std::max(step, std::floor(lines / step) * step);
+  }
+  float rest = total / lines;
+  float again = std::clamp(rest, 1.0f, OV02C10_AGAIN_MAX / 16.0f);
+  rest /= again;
+  float dgain = std::clamp(rest, 1.0f, OV02C10_DGAIN_MAX / 1024.0f);
+
+  uint32_t new_lines = (uint32_t) lines;
+  uint16_t new_again = (uint16_t) (again * 16.0f + 0.5f);
+  uint32_t new_dgain = (uint32_t) (dgain * 1024.0f + 0.5f);
+  if (new_lines == this->exposure_lines_ && new_again == this->analog_gain_ && new_dgain == this->digital_gain_)
+    return;  // at a limit: as bright or as dark as it gets
+  ESP_LOGD(TAG, "AE: brightness %u -> target %u: %.1f ms, gain %.2fx, digital %.2fx", mean, this->ae_target_,
+           new_lines * line_us / 1000.0f, new_again / 16.0f, new_dgain / 1024.0f);
+  this->exposure_lines_ = new_lines;
+  this->analog_gain_ = new_again;
+  this->digital_gain_ = new_dgain;
+  this->apply_exposure_();
+}
+
+void P4CSICamera::set_auto_exposure_runtime(bool on) {
+  this->auto_exposure_ = on;
+  ESP_LOGI(TAG, "Auto exposure %s", on ? "ON" : "OFF");
+  this->exposure_changed_();
+}
+
+void P4CSICamera::set_ae_target_runtime(uint8_t target) {
+  this->ae_target_ = target;
+  ESP_LOGI(TAG, "Auto exposure target set to %u", target);
+  this->exposure_changed_();
+}
+
+void P4CSICamera::set_exposure_ms_runtime(float ms) {
+  this->auto_exposure_ = false;
+  this->exposure_lines_ = (uint32_t) (ms * 1000000.0f / this->line_ns_);
+  ESP_LOGI(TAG, "Exposure set to %.1f ms (auto exposure off)", ms);
+  this->apply_exposure_();
+}
+
+void P4CSICamera::set_analog_gain_runtime(float gain) {
+  this->auto_exposure_ = false;
+  this->analog_gain_ = (uint16_t) (gain * 16.0f + 0.5f);
+  ESP_LOGI(TAG, "Analog gain set to %.2fx (auto exposure off)", gain);
+  this->apply_exposure_();
+}
+
+void P4CSICamera::set_digital_gain_runtime(float gain) {
+  this->auto_exposure_ = false;
+  this->digital_gain_ = (uint32_t) (gain * 1024.0f + 0.5f);
+  ESP_LOGI(TAG, "Digital gain set to %.2fx (auto exposure off)", gain);
+  this->apply_exposure_();
 }
 
 void P4CSICamera::set_jpeg_quality_runtime(uint8_t quality) {
