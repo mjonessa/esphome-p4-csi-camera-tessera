@@ -8,6 +8,9 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_video_init.h"
+#include "esp_video_device.h"
+#include "esp_cam_sensor_detect.h"
+#include "ov02c10.h"
 #include "driver/i2c_master.h"
 #include "esp_task_wdt.h"
 #include "linux/videodev2.h"
@@ -71,6 +74,11 @@ void P4CSICameraImageReader::return_image() {
 // P4CSICamera
 // ===========================================================================
 
+// ESPHome links its sources from an archive, so ov02c10_sensor.c, which nothing calls by name, was left out of the
+// firmware and esp_video found no sensor driver to try. Naming its detect function here pulls the file in (as
+// esp_cam_sensor does for its own drivers with "-u <sensor>_detect"); its linker fragment keeps the table entry.
+static void *volatile keep_ov02c10_detect = reinterpret_cast<void *>(&ov02c10_detect);
+
 P4CSICamera::P4CSICamera() { global_p4_csi_camera = this; }
 
 // Logs why setup stopped and keeps it as the component's error, so the "marked FAILED" line of a log that connects
@@ -115,6 +123,11 @@ void P4CSICamera::setup() {
   esp_video_init_config_t cam_config = {};
   cam_config.csi = &csi_config;
 
+  esp_cam_sensor_detect_fn_t *detect_start = nullptr;
+  esp_cam_sensor_detect_fn_t *detect_end = nullptr;
+  esp_cam_sensor_detect_get_array(&detect_start, &detect_end);
+  ESP_LOGI(TAG, "  Sensor drivers linked: %d (OV02C10 at %p)", (int) (detect_end - detect_start), keep_ov02c10_detect);
+
   esp_err_t err = esp_video_init(&cam_config);
   if (err != ESP_OK) {
     this->fail_("esp_video_init failed: %s", esp_err_to_name(err));
@@ -122,23 +135,15 @@ void P4CSICamera::setup() {
   }
   ESP_LOGI(TAG, "esp_video initialized successfully");
 
-  // Try multiple device paths
-  const char *dev_paths[] = {"/dev/video0", "/dev/video1", "/dev/video2", "/dev/video10", "/dev/video20"};
-  for (int i = 0; i < 5; i++) {
-    int fd = open(dev_paths[i], O_RDONLY | O_NONBLOCK, 0);
-    if (fd >= 0) {
-      ESP_LOGI(TAG, "Found video device at %s (fd=%d)", dev_paths[i], fd);
-      this->video_fd_ = fd;
-      break;
-    } else {
-      ESP_LOGD(TAG, "  %s: not found (errno=%d)", dev_paths[i], errno);
-    }
-  }
-
+  // The MIPI-CSI device exists only when a sensor answered: esp_video_init returns ESP_OK without one. Any other
+  // /dev/video* is the ISP or the JPEG encoder, which take no capture format (VIDIOC_G_FMT then fails with EINVAL).
+  this->video_fd_ = open(ESP_VIDEO_MIPI_CSI_DEVICE_NAME, O_RDONLY | O_NONBLOCK, 0);
   if (this->video_fd_ < 0) {
-    this->fail_("No video device found at any path");
+    this->fail_("OV02C10 not detected on I2C 0x%02x (%d sensor drivers linked), %s missing", OV02C10_SCCB_ADDR,
+                (int) (detect_end - detect_start), ESP_VIDEO_MIPI_CSI_DEVICE_NAME);
     return;
   }
+  ESP_LOGI(TAG, "Found video device at %s (fd=%d)", ESP_VIDEO_MIPI_CSI_DEVICE_NAME, this->video_fd_);
 
   // Step 3: Set the pixel format to RGB565
   struct v4l2_format fmt = {};
