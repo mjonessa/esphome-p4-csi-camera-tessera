@@ -17,6 +17,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <cstdarg>
+#include <cstdio>
 #include <unistd.h>
 
 namespace esphome {
@@ -71,6 +73,17 @@ void P4CSICameraImageReader::return_image() {
 
 P4CSICamera::P4CSICamera() { global_p4_csi_camera = this; }
 
+// Logs why setup stopped and keeps it as the component's error, so the "marked FAILED" line of a log that connects
+// after boot (over Wi-Fi, where the setup lines are long gone) still says what went wrong.
+void P4CSICamera::fail_(const char *format, ...) {
+  va_list args;
+  va_start(args, format);
+  vsnprintf(this->failure_, sizeof(this->failure_), format, args);
+  va_end(args);
+  ESP_LOGE(TAG, "%s", this->failure_);
+  this->mark_failed(LOG_STR(this->failure_));
+}
+
 void P4CSICamera::setup() {
   ESP_LOGI(TAG, "Setting up ESP32-P4 CSI Camera (OV02C10) via esp_video...");
   ESP_LOGI(TAG, "  Data lanes: %d", this->data_lanes_);
@@ -83,8 +96,7 @@ void P4CSICamera::setup() {
     i2c_master_bus_handle_t bus_handle = nullptr;
     esp_err_t bus_err = i2c_master_get_bus_handle((i2c_port_num_t) this->i2c_bus_->get_port(), &bus_handle);
     if (bus_err != ESP_OK || bus_handle == nullptr) {
-      ESP_LOGE(TAG, "I2C bus on port %d is not ready: %s", this->i2c_bus_->get_port(), esp_err_to_name(bus_err));
-      this->mark_failed();
+      this->fail_("I2C bus on port %d is not ready: %s", this->i2c_bus_->get_port(), esp_err_to_name(bus_err));
       return;
     }
     ESP_LOGI(TAG, "  SCCB: shared ESPHome I2C bus, port %d", this->i2c_bus_->get_port());
@@ -105,8 +117,7 @@ void P4CSICamera::setup() {
 
   esp_err_t err = esp_video_init(&cam_config);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "esp_video_init failed: %s", esp_err_to_name(err));
-    this->mark_failed();
+    this->fail_("esp_video_init failed: %s", esp_err_to_name(err));
     return;
   }
   ESP_LOGI(TAG, "esp_video initialized successfully");
@@ -125,8 +136,7 @@ void P4CSICamera::setup() {
   }
 
   if (this->video_fd_ < 0) {
-    ESP_LOGE(TAG, "No video device found at any path");
-    this->mark_failed();
+    this->fail_("No video device found at any path");
     return;
   }
 
@@ -134,8 +144,7 @@ void P4CSICamera::setup() {
   struct v4l2_format fmt = {};
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(this->video_fd_, VIDIOC_G_FMT, &fmt) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_G_FMT failed");
-    this->mark_failed();
+    this->fail_("VIDIOC_G_FMT failed (errno %d)", errno);
     return;
   }
 
@@ -177,8 +186,7 @@ void P4CSICamera::setup() {
   req.memory = V4L2_MEMORY_MMAP;
 
   if (ioctl(this->video_fd_, VIDIOC_REQBUFS, &req) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_REQBUFS failed");
-    this->mark_failed();
+    this->fail_("VIDIOC_REQBUFS failed (errno %d)", errno);
     return;
   }
 
@@ -190,24 +198,22 @@ void P4CSICamera::setup() {
     buf.index = i;
 
     if (ioctl(this->video_fd_, VIDIOC_QUERYBUF, &buf) != 0) {
-      ESP_LOGE(TAG, "VIDIOC_QUERYBUF failed for buf %d", i);
-      this->mark_failed();
+      this->fail_("VIDIOC_QUERYBUF failed for buf %d (errno %d)", i, errno);
       return;
     }
 
     this->frame_buffers_[i] = (uint8_t *)mmap(NULL, buf.length,
         PROT_READ | PROT_WRITE, MAP_SHARED, this->video_fd_, buf.m.offset);
-    if (this->frame_buffers_[i] == nullptr) {
-      ESP_LOGE(TAG, "mmap failed for buf %d", i);
-      this->mark_failed();
+    if (this->frame_buffers_[i] == nullptr || this->frame_buffers_[i] == MAP_FAILED) {
+      this->frame_buffers_[i] = nullptr;
+      this->fail_("mmap failed for buf %d", i);
       return;
     }
     this->frame_buf_size_ = buf.length;
 
     // Queue the buffer
     if (ioctl(this->video_fd_, VIDIOC_QBUF, &buf) != 0) {
-      ESP_LOGE(TAG, "VIDIOC_QBUF failed for buf %d", i);
-      this->mark_failed();
+      this->fail_("VIDIOC_QBUF failed for buf %d (errno %d)", i, errno);
       return;
     }
   }
@@ -217,8 +223,7 @@ void P4CSICamera::setup() {
   // Step 6: Start streaming
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   if (ioctl(this->video_fd_, VIDIOC_STREAMON, &type) != 0) {
-    ESP_LOGE(TAG, "VIDIOC_STREAMON failed");
-    this->mark_failed();
+    this->fail_("VIDIOC_STREAMON failed (errno %d)", errno);
     return;
   }
   ESP_LOGI(TAG, "Video streaming started!");
@@ -235,8 +240,7 @@ void P4CSICamera::setup() {
   jpeg_cfg.timeout_ms = 1000;
   err = jpeg_new_encoder_engine(&jpeg_cfg, &this->jpeg_handle_);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "JPEG encoder init failed: %s", esp_err_to_name(err));
-    this->mark_failed();
+    this->fail_("JPEG encoder init failed: %s", esp_err_to_name(err));
     return;
   }
 
@@ -246,8 +250,7 @@ void P4CSICamera::setup() {
   mem_cfg.buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER;
   this->jpeg_out_buf_ = (uint8_t *)jpeg_alloc_encoder_mem(this->jpeg_out_buf_size_, &mem_cfg, &this->jpeg_out_buf_size_);
   if (!this->jpeg_out_buf_) {
-    ESP_LOGE(TAG, "Failed to alloc JPEG output buffer");
-    this->mark_failed();
+    this->fail_("Failed to alloc JPEG output buffer");
     return;
   }
 
@@ -393,6 +396,8 @@ void P4CSICamera::dump_config() {
   ESP_LOGCONFIG(TAG, "  Data Lanes: %d", this->data_lanes_);
   ESP_LOGCONFIG(TAG, "  Max Update Interval: %d ms", this->max_update_interval_);
   ESP_LOGCONFIG(TAG, "  Initialized: %s", this->initialized_ ? "YES" : "NO");
+  if (this->failure_[0] != '\0')
+    ESP_LOGCONFIG(TAG, "  Failed: %s", this->failure_);
 }
 
 // Camera interface

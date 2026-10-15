@@ -95,6 +95,7 @@ class P4CSICamera : public camera::Camera {
 
  protected:
   bool has_requested_image_() const;
+  void fail_(const char *format, ...) __attribute__((format(printf, 2, 3)));
 
   // Configuration
   uint8_t data_lanes_{2};
@@ -124,6 +125,7 @@ class P4CSICamera : public camera::Camera {
 
   // State
   bool initialized_{false};
+  char failure_[96]{};
   std::shared_ptr<P4CSICameraImage> current_image_;
   uint8_t single_requesters_{0};
   uint8_t stream_requesters_{0};
