@@ -1,18 +1,43 @@
-# p4_csi_camera for a Tessera screen (Guition JC8012P4A1)
+# Panel camera
 
-A patched copy of [sullb/esphome-p4-csi-camera](https://github.com/sullb/esphome-p4-csi-camera) (commit `461aa9b`,
-MIT licence, see `LICENSE`) for a 10.1-inch Guition JC8012P4A1 that runs
-[Tessera](https://github.com/MaxGramser/homeassistant_espscreen) firmware.
+The camera built into the 10.1-inch Guition JC8012P4A1 (first build, OV02C10 sensor) as a camera of the screen in
+Home Assistant: a picture on a dashboard, a stream when you open it, snapshots in automations.
 
-## What changed from upstream
+## What you need
+
+- A Guition JC8012P4A1, first build ("chip revision: v1.3" in the boot log), with the camera module fitted.
+- A screen running Tessera firmware with ESPHome 2026.9.0 or newer.
+
+## Set up
+
+1. In Tessera, open **Plugins** and add this repository by its link:
+   `https://github.com/mjonessa/esphome-p4-csi-camera-tessera`.
+2. Tick your screen. It builds once with the plugin and updates over Wi-Fi.
+3. In Home Assistant, open the screen's device: **Panel Camera** is there, with **Camera JPEG Quality** and the two
+   flip switches.
+
+## What it is
+
+The driver in `components/p4_csi_camera` is a patched copy of
+[sullb/esphome-p4-csi-camera](https://github.com/sullb/esphome-p4-csi-camera) (commit `461aa9b`, MIT):
 
 - **`i2c_id`**: the OV02C10's control bus (SCCB) is on GPIO7/GPIO8, the same wires as the touch panel. Upstream
   creates its own I2C controller on port 0 there, which collides with Tessera's `touch_bus`. With `i2c_id: touch_bus`
-  the camera gets that bus's handle (`i2c_master_get_bus_handle`) and passes it to `esp_video` with
+  the camera takes that bus's handle (`i2c_master_get_bus_handle`) and passes it to `esp_video` with
   `init_sccb = false`, so the touch panel and the camera share one controller. Without `i2c_id` it behaves as upstream.
 - **`sccb_frequency`** (default `100kHz`): the camera's speed on that bus. The touch panel keeps its own 400 kHz.
 - **esp-video-components pinned** to commit `ee31057` instead of `master`, so a build doesn't change under you.
 
-## Using it
+`components/panel_camera` only registers the plugin with Tessera.
 
-Paste `override.yaml` into the screen's **··· → Override YAML** in Tessera. **Save & check**, then **Update firmware**.
+## Known limits
+
+- About two pictures a second; colours come from fixed white-balance gains and may look off in some light.
+- The upstream driver was never run beside a MIPI-DSI display before this plugin. If touch stops reacting after the
+  update, remove the plugin and update again.
+
+## Privacy
+
+Pictures go only to your Home Assistant, and only when it asks for one. Everyone who can open the screen's device or
+a dashboard with its camera can see through it. Disable the camera entity in Home Assistant to stop that for a while,
+or remove the plugin.

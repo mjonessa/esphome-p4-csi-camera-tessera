@@ -1,0 +1,10 @@
+{
+  "_meta": { "name": "English" },
+  "screen": {
+    "name": "Panel camera"
+  },
+  "app": {
+    "name": "Panel camera",
+    "summary": "The 10.1-inch Guition's own OV02C10 camera as a camera of the screen in Home Assistant."
+  }
+}

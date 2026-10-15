@@ -1,0 +1,26 @@
+# What a screen gets when it takes this plugin: its OV02C10 camera as ESPHome's camera, which Home Assistant shows on the
+# screen's device, a number for the JPEG quality and two switches to flip the picture. The sensor answers on the touch
+# panel's bus (touch_bus, GPIO7/GPIO8); esp_video asks for the MIPI PHY's LDO the board file already holds at 2.5 V.
+p4_csi_camera:
+  id: panel_camera_cam
+  name: "Panel Camera"
+  i2c_id: touch_bus
+  data_lanes: 2
+  max_framerate: 2 fps
+  idle_framerate: 0.1 fps
+  jpeg_quality: 40
+
+number:
+  - platform: p4_csi_camera
+    camera_id: panel_camera_cam
+    name: "Camera JPEG Quality"
+
+switch:
+  - platform: p4_csi_camera
+    camera_id: panel_camera_cam
+    vertical_flip:
+      name: "Camera Vertical Flip"
+    horizontal_flip:
+      name: "Camera Horizontal Flip"
+
+panel_camera:
