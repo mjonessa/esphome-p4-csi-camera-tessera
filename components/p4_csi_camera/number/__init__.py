@@ -14,13 +14,14 @@ CONF_CAMERA_ID = "camera_id"
 P4CSICameraNumber = p4_csi_camera_ns.class_("P4CSICameraNumber", number.Number, cg.Component)
 NumberKind = p4_csi_camera_ns.enum("NumberKind")
 
-# key: (kind, icon, unit, min, max, step). Exposure and the gains start on the sensor's own values; once set, a value is
+# key: (kind, icon, unit, min, max, step). The entity shows the sensor's value rounded to the step (1132 lines is 31.6 ms,
+# shown as 32). Exposure and the gains start on the sensor's own values; once set, a value is
 # kept across restarts (restore_value).
 NUMBERS = {
     "jpeg_quality": (NumberKind.NUMBER_JPEG_QUALITY, "mdi:quality-high", None, 10, 100, 1),
-    "exposure": (NumberKind.NUMBER_EXPOSURE, "mdi:camera-timer", UNIT_MILLISECOND, 0.1, 1000, 0.1),
-    "analog_gain": (NumberKind.NUMBER_ANALOG_GAIN, "mdi:brightness-6", "x", 1, 15.5, 0.0625),
-    "digital_gain": (NumberKind.NUMBER_DIGITAL_GAIN, "mdi:brightness-7", "x", 1, 4, 0.05),
+    "exposure": (NumberKind.NUMBER_EXPOSURE, "mdi:camera-timer", UNIT_MILLISECOND, 1, 500, 1),
+    "analog_gain": (NumberKind.NUMBER_ANALOG_GAIN, "mdi:brightness-6", "x", 1, 15.5, 0.5),
+    "digital_gain": (NumberKind.NUMBER_DIGITAL_GAIN, "mdi:brightness-7", "x", 1, 4, 0.1),
 }
 
 

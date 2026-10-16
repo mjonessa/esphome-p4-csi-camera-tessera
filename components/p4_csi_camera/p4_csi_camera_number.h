@@ -2,6 +2,7 @@
 
 #ifdef USE_ESP32_VARIANT_ESP32P4
 
+#include <algorithm>
 #include <cmath>
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
@@ -34,7 +35,7 @@ class P4CSICameraNumber : public number::Number, public Component {
       }
     }
     if (this->usable_())
-      this->publish_state(this->current_());
+      this->publish_state(this->shown_());
   }
 
   float get_setup_priority() const override { return setup_priority::DATA - 1.0f; }
@@ -79,7 +80,18 @@ class P4CSICameraNumber : public number::Number, public Component {
     this->apply_(value);
     if (this->restore_value_)
       this->pref_.save(&value);
-    this->publish_state(this->current_());
+    this->publish_state(this->shown_());
+  }
+
+  // The sensor's value on the slider's step: exposure and gain come back in the sensor's units (lines, 1/16x, 1/1024x),
+  // which would show as 31.60318 ms or 1.000977x.
+  float shown_() const {
+    float step = this->traits.get_step();
+    float value = this->current_();
+    if (step <= 0)
+      return value;
+    value = std::round(value / step) * step;
+    return std::clamp(value, this->traits.get_min_value(), this->traits.get_max_value());
   }
 
   P4CSICamera *camera_{nullptr};

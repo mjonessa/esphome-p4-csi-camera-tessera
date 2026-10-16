@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 - 2026-10-16
+
+- Simpler sliders: **Camera Exposure** in whole milliseconds (1 to 500), **Camera Analog Gain** in steps of 0.5x and
+  **Camera Digital Gain** in steps of 0.1x, shown rounded to those steps.
+
 ## 0.3.0 - 2026-10-16
 
 - Auto exposure and **Camera Brightness Target** are gone: they didn't brighten the picture. The camera starts on

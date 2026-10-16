@@ -20,9 +20,9 @@ Home Assistant: a picture on a dashboard, a stream when you open it, snapshots i
 The OV02C10 has no auto exposure, so the camera starts on the sensor's own exposure and gain (from its start-up
 table: about 32 ms at 8x analog gain). In Home Assistant, under the camera's controls:
 
-- **Camera Analog Gain** (1x to 15.5x) brightens with the least noise; try this first.
-- **Camera Digital Gain** (1x to 4x) on top of it, for a little more.
-- **Camera Exposure** (ms): longer is brighter but blurs movement. Past about 32 ms the sensor slows its frame rate
+- **Camera Analog Gain** (1x to 15.5x, in steps of 0.5x) brightens with the least noise; try this first.
+- **Camera Digital Gain** (1x to 4x, in steps of 0.1x) on top of it, for a little more.
+- **Camera Exposure** (1 to 500 ms): longer is brighter but blurs movement. Past about 32 ms the sensor slows its frame rate
   to fit the exposure.
 
 What you set is kept across restarts and updates.
